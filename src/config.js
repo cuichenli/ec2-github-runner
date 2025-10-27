@@ -7,6 +7,8 @@ class Config {
       ec2ImageId: core.getInput('ec2-image-id'),
       ec2InstanceId: core.getInput('ec2-instance-id'),
       ec2InstanceType: core.getInput('ec2-instance-type'),
+      templateId: core.getInput('template-id'),
+      fleetId: core.getInput('fleet-id'),
       githubToken: core.getInput('github-token'),
       iamRoleName: core.getInput('iam-role-name'),
       label: core.getInput('label'),

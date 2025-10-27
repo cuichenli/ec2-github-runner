@@ -1,4 +1,6 @@
-const { EC2Client, RunInstancesCommand, TerminateInstancesCommand, waitUntilInstanceRunning } = require('@aws-sdk/client-ec2');
+const { EC2Client, TerminateInstancesCommand, waitUntilInstanceRunning, CreateLaunchTemplateCommand, CreateFleetCommand, DeleteLaunchTemplateCommand, DeleteFleetsCommand } = require('@aws-sdk/client-ec2');
+
+const { v4 } = require("uuid")
 
 const core = require('@actions/core');
 const config = require('./config');
@@ -44,46 +46,112 @@ function buildUserDataScript(githubRegistrationToken, label) {
   return userData;
 }
 
-function buildMarketOptions() {
-  if (config.input.marketType !== 'spot') {
-    return undefined;
-  }
+async function createLaunchTemplate(label, githubRegistrationToken) {
+  const ec2 = new EC2Client();
 
-  return {
-    MarketType: config.input.marketType,
-    SpotOptions: {
-      SpotInstanceType: 'one-time',
+  const userData = buildUserDataScript(githubRegistrationToken, label);
+
+  const input = {
+    LaunchTemplateName: v4(),
+    LaunchTemplateData: {
+      ImageId: config.input.ec2ImageId,
+      UserData: Buffer.from(userData.join('\n')).toString('base64'),
+      SecurityGroupIds: [config.input.securityGroupId],
+      IamInstanceProfile: {
+        Name: config.input.iamRoleName
+      }
     },
   };
+
+  const command = new CreateLaunchTemplateCommand(input)
+  const result = await ec2.send(command);
+  core.setOutput("template-id", result.LaunchTemplate?.LaunchTemplateId)
+  console.log(result)
+  return result.LaunchTemplate?.LaunchTemplateId
 }
 
 async function startEc2Instance(label, githubRegistrationToken) {
   const ec2 = new EC2Client();
 
-  const userData = buildUserDataScript(githubRegistrationToken, label);
+  const templateId = await createLaunchTemplate(label, githubRegistrationToken)
+  
+  if (templateId === undefined) {
+    throw new Error("failed to create launch template")
+  }
 
-  const params = {
-    ImageId: config.input.ec2ImageId,
-    InstanceType: config.input.ec2InstanceType,
-    MaxCount: 1,
-    MinCount: 1,
-    SecurityGroupIds: [config.input.securityGroupId],
-    SubnetId: config.input.subnetId,
-    UserData: Buffer.from(userData.join('\n')).toString('base64'),
-    IamInstanceProfile: { Name: config.input.iamRoleName },
-    TagSpecifications: config.tagSpecifications,
-    InstanceMarketOptions: buildMarketOptions(),
+  const instanceTypes = config.input.ec2InstanceType.split(",")
+  const subnets = config.input.subnetId.split(",")
+
+  const instancesOverrides = []
+  
+  instanceTypes.forEach(type => {
+    subnets.forEach(subnet => {
+      instancesOverrides.push({
+        "InstanceType": type,
+        "SubnetId": subnet
+      })
+    })
+  })
+
+  const input = {
+    LaunchTemplateConfigs: [
+      {
+        LaunchTemplateSpecification: {
+          LaunchTemplateId: templateId, // your launch template ID
+          Version: "$Latest", // or a specific version
+        },
+        Overrides: instancesOverrides
+      },
+    ],
+    SpotOptions: {
+      AllocationStrategy: "price-capacity-optimized"
+    },
+    TargetCapacitySpecification: {
+      TotalTargetCapacity: 1,
+      DefaultTargetCapacityType: "spot",
+    },
+    Type: "instant", // launches immediately or fails
   };
 
   try {
-    const result = await ec2.send(new RunInstancesCommand(params));
-    const ec2InstanceId = result.Instances[0].InstanceId;
+    const command = new CreateFleetCommand(input)
+    const result = await ec2.send(command);
+    const ec2InstanceId = result.Instances[0].InstanceIds[0]
+    core.setOutput("fleet-id", result.FleetId)
     core.info(`AWS EC2 instance ${ec2InstanceId} is started`);
     return ec2InstanceId;
   } catch (error) {
     core.error('AWS EC2 instance starting error');
     throw error;
   }
+}
+
+async function deleteFleet() {
+  const fleetId = config.input.fleetId
+  if (!fleetId) {
+    core.info("do not have fleet id. not delete anything")
+    return 
+  }
+  const command = new DeleteFleetsCommand({
+    FleetIds: [fleetId]
+  })
+  const ec2 = new EC2Client()
+  ec2.send(command)
+  core.info("deleted ec2 fleet")
+}
+
+async function deleteLaunchTemplate() {
+  const templateId = config.input.templateId
+  if (!templateId) {
+    core.info("do not have template id. not delete anything")
+    return
+  }
+  const command = new DeleteLaunchTemplateCommand({
+    LaunchTemplateId: templateId
+  })
+  const ec2 = new EC2Client();
+  await ec2.send(command)
+  core.info("delete launch template")
 }
 
 async function terminateEc2Instance() {
@@ -96,6 +164,9 @@ async function terminateEc2Instance() {
   try {
     await ec2.send(new TerminateInstancesCommand(params));
     core.info(`AWS EC2 instance ${config.input.ec2InstanceId} is terminated`);
+
+    await deleteLaunchTemplate()
+    await deleteFleet()
     return;
   } catch (error) {
     core.error(`AWS EC2 instance ${config.input.ec2InstanceId} termination error`);

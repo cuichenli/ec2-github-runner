@@ -25,6 +25,12 @@ inputs:
       EC2 Instance Type.
       This input is required if you use the 'start' mode.
     required: false
+  template-id:
+    description: the template id to be deleted when stop
+    required: false
+  fleet-id:
+    description: the fleet id to be deleted when stop
+    required: false
   subnet-id:
     description: >-
       VPC Subnet Id. The subnet should belong to the same VPC as the specified security group.
